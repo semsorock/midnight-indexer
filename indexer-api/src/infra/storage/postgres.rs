@@ -185,7 +185,6 @@ impl Storage for PostgresStorage {
             FROM transactions
             INNER JOIN blocks ON blocks.id = transactions.block_id
             WHERE transactions.hash = $1
-            ORDER BY transactions.id DESC
         "};
 
         sqlx::query_as::<_, Transaction>(query)
@@ -194,10 +193,10 @@ impl Storage for PostgresStorage {
             .await
     }
 
-    async fn get_transaction_by_identifier(
+    async fn get_transactions_by_identifier(
         &self,
         identifier: &Identifier,
-    ) -> Result<Option<Transaction>, sqlx::Error> {
+    ) -> Result<Vec<Transaction>, sqlx::Error> {
         let query = indoc! {"
             SELECT
                 transactions.id,
@@ -213,12 +212,11 @@ impl Storage for PostgresStorage {
             FROM transactions
             INNER JOIN blocks ON blocks.id = transactions.block_id
             WHERE $1 = ANY(transactions.identifiers)
-            LIMIT 1
         "};
 
         sqlx::query_as::<_, Transaction>(query)
             .bind(identifier)
-            .fetch_optional(&*self.pool)
+            .fetch_all(&*self.pool)
             .await
     }
 
@@ -293,6 +291,7 @@ impl Storage for PostgresStorage {
             INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.address = $1
             AND transactions.block_id = (SELECT id FROM blocks WHERE hash = $2)
+            AND transactions.apply_stage != 'Failure'
             ORDER BY id DESC
             LIMIT 1
         "};
@@ -322,6 +321,7 @@ impl Storage for PostgresStorage {
             INNER JOIN blocks ON blocks.id = transactions.block_id
             WHERE contract_actions.address = $1
             AND blocks.height = $2
+            AND transactions.apply_stage != 'Failure'
             ORDER BY id DESC
             LIMIT 1
         "};
@@ -351,8 +351,7 @@ impl Storage for PostgresStorage {
             AND contract_actions.transaction_id = (
                 SELECT id FROM transactions
                 WHERE hash = $2
-                AND apply_stage = 'Success'
-                ORDER BY id DESC
+                AND apply_stage != 'Failure'
                 LIMIT 1
             )
             ORDER BY id DESC
@@ -383,6 +382,7 @@ impl Storage for PostgresStorage {
             INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.address = $1
             AND $2 = ANY(transactions.identifiers)
+            AND transactions.apply_stage != 'Failure'
             ORDER BY id DESC
             LIMIT 1
         "};
@@ -436,7 +436,7 @@ impl Storage for PostgresStorage {
                     FROM contract_actions
                     INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
                     INNER JOIN blocks ON blocks.id = transactions.block_id
-                    WHERE transactions.apply_stage = 'Success'
+                    WHERE transactions.apply_stage != 'Failure'
                     AND contract_actions.address = $1
                     AND blocks.height >= $2
                     AND contract_actions.id >= $3
