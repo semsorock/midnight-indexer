@@ -37,9 +37,10 @@ lint:
 
 test:
     # We must build the executables needed by the e2e tests!
-    cargo build -p chain-indexer  --features {{feature}}
-    cargo build -p wallet-indexer --features {{feature}}
-    cargo build -p indexer-api    --features {{feature}}
+    if [ "{{feature}}" = "cloud" ];      then cargo build -p chain-indexer      --features cloud;      fi
+    if [ "{{feature}}" = "cloud" ];      then cargo build -p wallet-indexer     --features cloud;      fi
+    if [ "{{feature}}" = "cloud" ];      then cargo build -p indexer-api        --features cloud;      fi
+    if [ "{{feature}}" = "standalone" ]; then cargo build -p indexer-standalone --features standalone; fi
     cargo nextest run --workspace --exclude indexer-standalone --features {{feature}}
     # Check indexer-api schema:
     cargo run -p indexer-api --bin indexer-api-cli print-api-schema-v1 > indexer-api/graphql/schema-v1.graphql.check
@@ -127,21 +128,24 @@ run-chain-indexer node="ws://localhost:9944" network_id="Undeployed":
         APP__INFRA__NODE__URL={{node}} \
         cargo run -p chain-indexer --features {{feature}}
 
-run-wallet-indexer:
+run-wallet-indexer network_id="Undeployed":
     docker compose up -d postgres nats
     RUST_LOG=wallet_indexer=debug,indexer_common=debug,fastrace_opentelemetry=off,info \
         CONFIG_FILE=wallet-indexer/config.yaml \
+        APP__APPLICATION__NETWORK_ID={{network_id}} \
         cargo run -p wallet-indexer --features {{feature}}
 
-run-indexer-api:
+run-indexer-api network_id="Undeployed":
     docker compose up -d postgres nats
     RUST_LOG=indexer_api=debug,indexer_common=debug,info \
         CONFIG_FILE=indexer-api/config.yaml \
+        APP__APPLICATION__NETWORK_ID={{network_id}} \
         cargo run -p indexer-api --bin indexer-api --features {{feature}}
 
-run-indexer-standalone node="ws://localhost:9944":
+run-indexer-standalone node="ws://localhost:9944" network_id="Undeployed":
     RUST_LOG=indexer=debug,chain_indexer=debug,wallet_indexer=debug,indexer_api=debug,indexer_common=debug,fastrace_opentelemetry=off,info \
         CONFIG_FILE=indexer/config.yaml \
+        APP__APPLICATION__NETWORK_ID={{network_id}} \
         APP__INFRA__NODE__URL={{node}} \
         APP__INFRA__STORAGE__CNN_URL=target/data/indexer.sqlite \
         cargo run -p indexer-standalone --features standalone
