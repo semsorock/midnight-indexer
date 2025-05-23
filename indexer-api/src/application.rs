@@ -14,11 +14,7 @@
 use crate::domain::Api;
 use anyhow::Context as AnyhowContext;
 use futures::{TryStreamExt, future::ok};
-use indexer_common::{
-    domain::{BlockIndexed, Subscriber},
-    error::StdErrorExt,
-};
-use log::error;
+use indexer_common::domain::{BlockIndexed, Subscriber};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -33,16 +29,7 @@ pub async fn run(api: impl Api, subscriber: impl Subscriber) -> anyhow::Result<(
         let caught_up = caught_up.clone();
 
         async move {
-            let block_indexed_stream =
-                subscriber
-                    .subscribe::<BlockIndexed>()
-                    .await
-                    .inspect_err(|error| {
-                        error!(
-                            error:% = error.as_chain();
-                            "cannot subscribe to BlockIndexed events"
-                        )
-                    })?;
+            let block_indexed_stream = subscriber.subscribe::<BlockIndexed>();
 
             block_indexed_stream
                 .try_for_each(|block_indexed| {

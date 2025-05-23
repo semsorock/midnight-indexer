@@ -15,10 +15,14 @@ use crate::{
     domain::{Message, Subscriber},
     infra::pub_sub::nats::Config,
 };
-use async_nats::{Client, ConnectOptions};
-use futures::{Stream, StreamExt};
+use async_nats::{Client, ConnectOptions, Event};
+use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, stream};
+use log::{debug, warn};
 use secrecy::ExposeSecret;
+use std::time::Duration;
 use thiserror::Error;
+
+const REPEAT_DELAY: Duration = Duration::from_millis(100);
 
 // NATS based [Subscriber] implementation.
 #[derive(Clone)]
@@ -34,8 +38,20 @@ impl NatsSubscriber {
             password,
         } = config;
 
-        let options =
-            ConnectOptions::new().user_and_password(username, password.expose_secret().to_owned());
+        let options = ConnectOptions::new()
+            .user_and_password(username, password.expose_secret().to_owned())
+            .event_callback(|event| async {
+                match event {
+                    Event::Connected => debug!("NATS client connected"),
+                    Event::Disconnected => warn!("NATS client disconnected"),
+                    Event::LameDuckMode => warn!("NATS client in lame duck mode"),
+                    Event::Draining => warn!("NATS client draining"),
+                    Event::Closed => warn!("NATS client closed"),
+                    Event::SlowConsumer(_) => warn!("NATS client has slow consumer"),
+                    Event::ServerError(error) => warn!(error:%; "NATS server error"),
+                    Event::ClientError(error) => warn!(error:%; "NATS client error"),
+                }
+            });
         let client = options.connect(url).await?;
 
         Ok(Self { client })
@@ -45,18 +61,27 @@ impl NatsSubscriber {
 impl Subscriber for NatsSubscriber {
     type Error = SubscriberError;
 
-    async fn subscribe<T>(
-        &self,
-    ) -> Result<impl Stream<Item = Result<T, Self::Error>> + Send, Self::Error>
+    fn subscribe<T>(&self) -> impl Stream<Item = Result<T, Self::Error>> + Send
     where
         T: Message,
     {
-        let subscriber = self.client.subscribe(T::TOPIC).await?;
-        let subscriber = subscriber.map(|message| {
-            let message = serde_json::from_slice(&message.payload)?;
-            Ok(message)
-        });
-        Ok(subscriber)
+        // The subscriber stream may complete, without returning any error (it is not baked into the
+        // item type), e.g. because of disconnecting. Therefore we wrap it into an infinite "outer"
+        // stream which is slightly throttled and resubscribe repeatedly.
+        tokio_stream::StreamExt::throttle(stream::repeat(()), REPEAT_DELAY)
+            .map(|_| Ok::<_, Self::Error>(()))
+            .and_then(|_| {
+                self.client
+                    .subscribe(T::TOPIC)
+                    .map_err(SubscriberError::Subscribe)
+            })
+            .map_ok(|subscriber| {
+                subscriber.map(|message| {
+                    let message = serde_json::from_slice(&message.payload)?;
+                    Ok(message)
+                })
+            })
+            .try_flatten()
     }
 }
 
