@@ -29,7 +29,7 @@ use futures::{
     stream::{self, TryStreamExt},
 };
 use indexer_common::domain::{
-    ApplyStage, NetworkId, SessionId, Subscriber, WalletIndexed, ZswapStateStorage,
+    ApplyStage, LedgerStateStorage, NetworkId, SessionId, Subscriber, WalletIndexed,
 };
 use log::{debug, warn};
 use metrics::{Counter, counter};
@@ -72,7 +72,7 @@ impl<S, B, Z> WalletSubscription<S, B, Z>
 where
     S: Storage,
     B: Subscriber,
-    Z: ZswapStateStorage,
+    Z: LedgerStateStorage,
 {
     /// Subscribe to wallet events for the given session ID starting at the given index or at zero
     /// if the index is omitted. Wallet events are either a ViewingUpdate or a ProgressUpdate.
@@ -143,12 +143,12 @@ async fn viewing_updates<'a, S, B, Z>(
 where
     S: Storage,
     B: Subscriber,
-    Z: ZswapStateStorage,
+    Z: LedgerStateStorage,
 {
     let network_id = cx.get_network_id();
     let storage = cx.get_storage::<S>();
     let subscriber = cx.get_subscriber::<B>();
-    let zswap_state_storage = cx.get_zswap_state_storage::<Z>();
+    let ledger_state_storage = cx.get_ledger_state_storage::<Z>();
     let zswap_state_cache = cx.get_zswap_state_cache();
 
     let wallet_indexed_events = subscriber
@@ -170,7 +170,7 @@ where
                 next_index,
                 transaction,
                 network_id,
-                zswap_state_storage,
+                ledger_state_storage,
                 zswap_state_cache,
             )
             .await?;
@@ -203,7 +203,7 @@ where
                     next_index,
                     transaction,
                     network_id,
-                    zswap_state_storage,
+                    ledger_state_storage,
                     zswap_state_cache,
                 )
                 .await?;
@@ -225,12 +225,12 @@ async fn viewing_update<S, Z>(
     from: u64,
     transaction: Transaction,
     network_id: NetworkId,
-    zswap_state_storage: &Z,
+    ledger_state_storage: &Z,
     zswap_state_cache: &ZswapStateCache,
 ) -> async_graphql::Result<ViewingUpdate<S>>
 where
     S: Storage,
-    Z: ZswapStateStorage,
+    Z: LedgerStateStorage,
 {
     // For failures, don't increment the index, because no changes were applied to the zswap state.
     // Put another way: the next transaction will have the same start_index like this end index.
@@ -252,7 +252,7 @@ where
                 transaction.start_index - 1,
                 network_id,
                 transaction.protocol_version,
-                zswap_state_storage,
+                ledger_state_storage,
             )
             .await
             .internal("create collapsed update")?;

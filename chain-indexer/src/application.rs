@@ -15,14 +15,14 @@ mod metrics;
 
 use crate::{
     application::metrics::Metrics,
-    domain::{Block, BlockInfo, Node, ZswapState, storage::Storage},
+    domain::{Block, BlockInfo, LedgerState, Node, storage::Storage},
 };
 use anyhow::{Context, bail};
 use async_stream::stream;
 use byte_unit::{Byte, UnitType};
 use fastrace::{Span, future::FutureExt, prelude::SpanContext, trace};
 use futures::{Stream, StreamExt, TryStreamExt, future::ok};
-use indexer_common::domain::{BlockIndexed, NetworkId, Publisher, ZswapStateStorage};
+use indexer_common::domain::{BlockIndexed, LedgerStateStorage, NetworkId, Publisher};
 use log::{info, warn};
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -36,7 +36,7 @@ use tokio::{
 pub struct Config {
     pub network_id: NetworkId,
     pub blocks_buffer: usize,
-    pub save_zswap_state_after: u32,
+    pub save_ledger_state_after: u32,
     pub caught_up_max_distance: u32,
     pub caught_up_leeway: u32,
 }
@@ -46,7 +46,7 @@ impl Default for Config {
         Self {
             network_id: NetworkId::Undeployed,
             blocks_buffer: 10,
-            save_zswap_state_after: 1000,
+            save_ledger_state_after: 1000,
             caught_up_max_distance: 10,
             caught_up_leeway: 5,
         }
@@ -57,7 +57,7 @@ pub async fn run(
     config: Config,
     node: impl Node,
     storage: impl Storage,
-    mut zswap_state_storage: impl ZswapStateStorage,
+    mut ledger_state_storage: impl LedgerStateStorage,
     publisher: impl Publisher,
 ) -> anyhow::Result<()> {
     let network_id = config.network_id;
@@ -81,52 +81,54 @@ pub async fn run(
 
     let metrics = Metrics::new(highest_height, transaction_count, contract_action_count);
 
-    let (zswap_state, mut zswap_state_block_height) = zswap_state_storage
-        .load_zswap_state()
+    let (ledger_state, mut ledger_state_block_height) = ledger_state_storage
+        .load_ledger_state()
         .await
-        .context("get zswap state")?
+        .context("get ledger state")?
         .unzip();
-    let zswap_state = zswap_state
-        .map(|zswap_state| {
-            indexer_common::domain::ZswapState::deserialize(zswap_state, network_id)
-                .context("deserialize zswap state")
+    let ledger_state = ledger_state
+        .map(|ledger_state| {
+            indexer_common::domain::LedgerState::deserialize(ledger_state, network_id)
+                .context("deserialize ledger state")
         })
         .transpose()?
         .unwrap_or_default();
-    let mut zswap_state = ZswapState::from(zswap_state);
+    let mut ledger_state = LedgerState::from(ledger_state);
 
-    // Reset zswap state if storage is behind zswap state storage.
-    if zswap_state_block_height > highest_height {
-        zswap_state_block_height = None;
-        zswap_state = ZswapState::default();
+    // Reset ledger state if storage is behind ledger state storage.
+    if ledger_state_block_height > highest_height {
+        ledger_state_block_height = None;
+        ledger_state = LedgerState::default();
     }
 
-    // Apply the transactions to the zswap state from the saved zswap state height (exclusively, +1)
-    // to the highest saved block height (inclusively); also save the zswap state thereafter.
+    // Apply the transactions to the ledger state from the saved ledger state height (exclusively,
+    // +1) to the highest saved block height (inclusively); also save the ledger state
+    // thereafter.
     if let Some(highest_height) = highest_height {
-        let zswap_state_block_height = zswap_state_block_height.unwrap_or_default();
+        let ledger_state_block_height = ledger_state_block_height.unwrap_or_default();
 
-        if zswap_state_block_height < highest_height {
-            info!(zswap_state_block_height, highest_height; "updating zswap state");
+        if ledger_state_block_height < highest_height {
+            info!(ledger_state_block_height, highest_height; "updating ledger state");
 
             let transaction_chunks =
-                storage.get_transaction_chunks(zswap_state_block_height + 1, highest_height);
+                storage.get_transaction_chunks(ledger_state_block_height + 1, highest_height);
             let mut transaction_chunks = pin!(transaction_chunks);
-            while let Some(mut transactions) = transaction_chunks
+            while let Some(transactions) = transaction_chunks
                 .try_next()
                 .await
                 .context("get next transaction chunk")?
             {
-                zswap_state.apply_transactions(transactions.as_mut_slice(), network_id)?;
+                let transactions = transactions.iter().map(|(t, h)| (t, *h));
+                ledger_state.apply_transactions(transactions, network_id)?;
             }
 
-            let raw_zswap_state = zswap_state
+            let raw_ledger_state = ledger_state
                 .serialize(network_id)
-                .context("serialize ZswapState")?;
-            zswap_state_storage
-                .save(&raw_zswap_state, highest_height, zswap_state.end_index())
+                .context("serialize ledger state")?;
+            ledger_state_storage
+                .save(&raw_ledger_state, highest_height, ledger_state.end_index())
                 .await
-                .context("save zswap state")?;
+                .context("save ledger state")?;
         }
     }
 
@@ -171,18 +173,18 @@ pub async fn run(
         while let Some(z) = get_and_index_block(
             config,
             &mut blocks,
-            zswap_state,
+            ledger_state,
             &highest_block_on_node,
             &mut caught_up,
             &storage,
-            &mut zswap_state_storage,
+            &mut ledger_state_storage,
             &publisher,
             &metrics,
         )
         .in_span(Span::root("get-and-index-block", SpanContext::random()))
         .await?
         {
-            zswap_state = z
+            ledger_state = z
         }
 
         Ok::<_, anyhow::Error>(())
@@ -255,14 +257,14 @@ async fn get_next_block<E>(
 async fn get_and_index_block<E>(
     config: Config,
     blocks: &mut (impl Stream<Item = Result<Block, E>> + Unpin),
-    zswap_state: ZswapState,
+    ledger_state: LedgerState,
     highest_block_on_node: &Arc<RwLock<Option<BlockInfo>>>,
     caught_up: &mut bool,
     storage: &impl Storage,
-    zswap_state_storage: &mut impl ZswapStateStorage,
+    ledger_state_storage: &mut impl LedgerStateStorage,
     publisher: &impl Publisher,
     metrics: &Metrics,
-) -> Result<Option<ZswapState>, anyhow::Error>
+) -> Result<Option<LedgerState>, anyhow::Error>
 where
     E: StdError + Send + Sync + 'static,
 {
@@ -272,20 +274,20 @@ where
 
     match block {
         Some(block) => {
-            let zswap_state = index_block(
+            let ledger_state = index_block(
                 config,
                 block,
-                zswap_state,
+                ledger_state,
                 highest_block_on_node,
                 caught_up,
                 storage,
-                zswap_state_storage,
+                ledger_state_storage,
                 publisher,
                 metrics,
             )
             .await?;
 
-            Ok(Some(zswap_state))
+            Ok(Some(ledger_state))
         }
 
         None => Ok(None),
@@ -297,25 +299,26 @@ where
 async fn index_block(
     config: Config,
     mut block: Block,
-    mut zswap_state: ZswapState,
+    mut ledger_state: LedgerState,
     highest_block_on_node: &Arc<RwLock<Option<BlockInfo>>>,
     caught_up: &mut bool,
     storage: &impl Storage,
-    zswap_state_storage: &mut impl ZswapStateStorage,
+    ledger_state_storage: &mut impl LedgerStateStorage,
     publisher: &impl Publisher,
     metrics: &Metrics,
-) -> Result<ZswapState, anyhow::Error> {
+) -> Result<LedgerState, anyhow::Error> {
     let Config {
         network_id,
-        save_zswap_state_after,
+        save_ledger_state_after,
         caught_up_max_distance,
         caught_up_leeway,
         ..
     } = config;
 
-    zswap_state.apply_transactions(&mut block.transactions, network_id)?;
+    let transactions = block.transactions.iter_mut().map(|t| (t, block.hash));
+    ledger_state.apply_transactions_mut(transactions, network_id)?;
 
-    if zswap_state.0.coin_coms.root() != block.zswap_state_root {
+    if ledger_state.zswap.coin_coms.root() != block.zswap_state_root {
         bail!(
             "zswap state root mismatch for block {} at height {}",
             block.hash,
@@ -323,7 +326,7 @@ async fn index_block(
         );
     }
 
-    let raw_zswap_state = zswap_state
+    let raw_ledger_state = ledger_state
         .serialize(network_id)
         .context("serialize ZswapState")?;
 
@@ -350,13 +353,13 @@ async fn index_block(
     // 1) Save the block first
     let max_transaction_id = storage.save_block(&block).await.context("save block")?;
 
-    // 2) Then save the zswap state. This order is important to prevent from applying the
+    // 2) Then save the ledger state. This order is important to prevent from applying the
     //    transactions twice.
-    if *caught_up || block.height % save_zswap_state_after == 0 {
-        zswap_state_storage
-            .save(&raw_zswap_state, block.height, zswap_state.end_index())
+    if *caught_up || block.height % save_ledger_state_after == 0 {
+        ledger_state_storage
+            .save(&raw_ledger_state, block.height, ledger_state.end_index())
             .await
-            .context("save zswap state")?;
+            .context("save ledger state")?;
     }
 
     info!(
@@ -364,11 +367,11 @@ async fn index_block(
         height = block.height,
         parent_hash:% = block.parent_hash,
         protocol_version:% = block.protocol_version,
-        zswap_state_size = format_bytes(raw_zswap_state.as_ref().len());
+        ledger_state_size = format_bytes(raw_ledger_state.as_ref().len());
         "block indexed"
     );
 
-    metrics.update(&block, &raw_zswap_state, node_block_height, *caught_up);
+    metrics.update(&block, &raw_ledger_state, node_block_height, *caught_up);
 
     publisher
         .publish(&BlockIndexed {
@@ -379,7 +382,7 @@ async fn index_block(
         .await
         .context("publish BlockIndexed event")?;
 
-    Ok(zswap_state)
+    Ok(ledger_state)
 }
 
 fn format_bytes(value: impl Into<Byte>) -> String {
