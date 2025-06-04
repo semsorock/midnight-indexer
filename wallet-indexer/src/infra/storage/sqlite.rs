@@ -180,14 +180,17 @@ mod tests {
     use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit};
     use futures::{StreamExt, TryStreamExt};
     use indexer_common::{
-        domain::{ApplyStage, ViewingKey},
+        domain::{TransactionResult, ViewingKey},
         infra::{
             migrations,
             pool::{self, sqlite::SqlitePool},
         },
     };
     use indoc::indoc;
-    use sqlx::{QueryBuilder, Row, types::time::OffsetDateTime};
+    use sqlx::{
+        QueryBuilder, Row,
+        types::{Json, time::OffsetDateTime},
+    };
     use std::{error::Error as StdError, iter, time::Duration};
     use uuid::Uuid;
 
@@ -228,7 +231,7 @@ mod tests {
                 block_id,
                 hash,
                 protocol_version,
-                apply_stage,
+                transaction_result,
                 raw,
                 merkle_tree_root,
                 start_index,
@@ -240,7 +243,7 @@ mod tests {
                 q.push_bind(block_id)
                     .push_bind(id.to_string())
                     .push_bind(1_000)
-                    .push_bind(ApplyStage::Success)
+                    .push_bind(Json(TransactionResult::Success))
                     .push_bind("raw")
                     .push_bind("merkle_tree_root")
                     .push_bind(0)

@@ -129,7 +129,7 @@ impl Storage for PostgresStorage {
                 transactions.hash,
                 blocks.hash AS block_hash,
                 transactions.protocol_version,
-                transactions.apply_stage,
+                transactions.transaction_result,
                 transactions.identifiers,
                 transactions.raw,
                 transactions.merkle_tree_root,
@@ -154,7 +154,7 @@ impl Storage for PostgresStorage {
                 transactions.hash,
                 blocks.hash AS block_hash,
                 transactions.protocol_version,
-                transactions.apply_stage,
+                transactions.transaction_result,
                 transactions.identifiers,
                 transactions.raw,
                 transactions.merkle_tree_root,
@@ -182,7 +182,7 @@ impl Storage for PostgresStorage {
                 transactions.hash,
                 blocks.hash AS block_hash,
                 transactions.protocol_version,
-                transactions.apply_stage,
+                transactions.transaction_result,
                 transactions.identifiers,
                 transactions.raw,
                 transactions.merkle_tree_root,
@@ -210,7 +210,7 @@ impl Storage for PostgresStorage {
                 transactions.hash,
                 blocks.hash AS block_hash,
                 transactions.protocol_version,
-                transactions.apply_stage,
+                transactions.transaction_result,
                 transactions.identifiers,
                 transactions.raw,
                 transactions.merkle_tree_root,
@@ -263,7 +263,7 @@ impl Storage for PostgresStorage {
         &self,
         address: &ContractAddress,
     ) -> Result<Option<ContractAction>, sqlx::Error> {
-        let query = indoc! {"
+        let query = indoc! {r#"
             SELECT
                 contract_actions.id AS id,
                 contract_actions.address,
@@ -272,10 +272,12 @@ impl Storage for PostgresStorage {
                 contract_actions.zswap_state,
                 contract_actions.transaction_id
             FROM contract_actions
+            INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.address = $1
+            AND transactions.transaction_result != '"Failure"'::jsonb
             ORDER BY id DESC
             LIMIT 1
-        "};
+        "#};
 
         sqlx::query_as::<_, ContractAction>(query)
             .bind(address)
@@ -289,7 +291,7 @@ impl Storage for PostgresStorage {
         address: &ContractAddress,
         hash: BlockHash,
     ) -> Result<Option<ContractAction>, sqlx::Error> {
-        let query = indoc! {"
+        let query = indoc! {r#"
             SELECT
                 contract_actions.id AS id,
                 contract_actions.address,
@@ -301,10 +303,10 @@ impl Storage for PostgresStorage {
             INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.address = $1
             AND transactions.block_id = (SELECT id FROM blocks WHERE hash = $2)
-            AND transactions.apply_stage != 'Failure'
+            AND transactions.transaction_result != '"Failure"'::jsonb
             ORDER BY id DESC
             LIMIT 1
-        "};
+        "#};
 
         sqlx::query_as::<_, ContractAction>(query)
             .bind(address)
@@ -319,7 +321,7 @@ impl Storage for PostgresStorage {
         address: &ContractAddress,
         height: u32,
     ) -> Result<Option<ContractAction>, sqlx::Error> {
-        let query = indoc! {"
+        let query = indoc! {r#"
             SELECT
                 contract_actions.id AS id,
                 contract_actions.address,
@@ -332,10 +334,10 @@ impl Storage for PostgresStorage {
             INNER JOIN blocks ON blocks.id = transactions.block_id
             WHERE contract_actions.address = $1
             AND blocks.height = $2
-            AND transactions.apply_stage != 'Failure'
+            AND transactions.transaction_result != '"Failure"'::jsonb
             ORDER BY id DESC
             LIMIT 1
-        "};
+        "#};
 
         sqlx::query_as::<_, ContractAction>(query)
             .bind(address)
@@ -350,7 +352,7 @@ impl Storage for PostgresStorage {
         address: &ContractAddress,
         hash: TransactionHash,
     ) -> Result<Option<ContractAction>, sqlx::Error> {
-        let query = indoc! {"
+        let query = indoc! {r#"
             SELECT
                 contract_actions.id AS id,
                 contract_actions.address,
@@ -359,16 +361,18 @@ impl Storage for PostgresStorage {
                 contract_actions.zswap_state,
                 contract_actions.transaction_id
             FROM contract_actions
+            INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.address = $1
-            AND contract_actions.transaction_id = (
+            AND transactions.id = (
                 SELECT id FROM transactions
                 WHERE hash = $2
-                AND apply_stage != 'Failure'
+                AND transaction_result != '"Failure"'::jsonb
                 LIMIT 1
             )
+            AND transactions.transaction_result != '"Failure"'::jsonb
             ORDER BY id DESC
             LIMIT 1
-        "};
+        "#};
 
         sqlx::query_as::<_, ContractAction>(query)
             .bind(address)
@@ -383,7 +387,7 @@ impl Storage for PostgresStorage {
         address: &ContractAddress,
         identifier: &Identifier,
     ) -> Result<Option<ContractAction>, sqlx::Error> {
-        let query = indoc! {"
+        let query = indoc! {r#"
                 SELECT
                     contract_actions.id AS id,
                     contract_actions.address,
@@ -395,10 +399,10 @@ impl Storage for PostgresStorage {
             INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.address = $1
             AND $2 = ANY(transactions.identifiers)
-            AND transactions.apply_stage != 'Failure'
+            AND transactions.transaction_result != '"Failure"'::jsonb
             ORDER BY id DESC
             LIMIT 1
-        "};
+        "#};
 
         sqlx::query_as::<_, ContractAction>(query)
             .bind(address)
@@ -412,7 +416,7 @@ impl Storage for PostgresStorage {
         &self,
         id: u64,
     ) -> Result<Vec<ContractAction>, sqlx::Error> {
-        let query = indoc! {"
+        let query = indoc! {r#"
             SELECT
                 contract_actions.id AS id,
                 contract_actions.address,
@@ -421,8 +425,10 @@ impl Storage for PostgresStorage {
                 contract_actions.zswap_state,
                 contract_actions.transaction_id
             FROM contract_actions
+            INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
             WHERE contract_actions.transaction_id = $1
-        "};
+            AND transactions.transaction_result != '"Failure"'::jsonb
+        "#};
 
         sqlx::query_as::<_, ContractAction>(query)
             .bind(id as i64)
@@ -440,7 +446,7 @@ impl Storage for PostgresStorage {
     ) -> impl Stream<Item = Result<ContractAction, sqlx::Error>> + Send {
         let chunks = try_stream! {
             loop {
-                let query = indoc! {"
+                let query = indoc! {r#"
                     SELECT
                         contract_actions.id AS id,
                         contract_actions.address,
@@ -451,13 +457,13 @@ impl Storage for PostgresStorage {
                     FROM contract_actions
                     INNER JOIN transactions ON transactions.id = contract_actions.transaction_id
                     INNER JOIN blocks ON blocks.id = transactions.block_id
-                    WHERE transactions.apply_stage != 'Failure'
-                    AND contract_actions.address = $1
+                    WHERE contract_actions.address = $1
                     AND blocks.height >= $2
                     AND contract_actions.id >= $3
+                    AND transactions.transaction_result != '"Failure"'::jsonb
                     ORDER BY id ASC
                     LIMIT $4
-                "};
+                "#};
 
                 let actions = sqlx::query_as::<_, ContractAction>(query)
                     .bind(address)
@@ -535,7 +541,7 @@ impl Storage for PostgresStorage {
                         transactions.hash,
                         blocks.hash AS block_hash,
                         transactions.protocol_version,
-                        transactions.apply_stage,
+                        transactions.transaction_result,
                         transactions.identifiers,
                         transactions.raw,
                         transactions.merkle_tree_root,

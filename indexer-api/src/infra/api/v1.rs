@@ -24,8 +24,8 @@ use crate::{
 };
 use anyhow::Context as AnyhowContext;
 use async_graphql::{
-    ComplexObject, Context, Interface, OneofObject, Schema, SchemaBuilder, SimpleObject, Union,
-    scalar,
+    ComplexObject, Context, Enum, Interface, OneofObject, Schema, SchemaBuilder, SimpleObject,
+    Union, scalar,
 };
 use async_graphql_axum::{GraphQL, GraphQLSubscription};
 use axum::{Router, routing::post_service};
@@ -148,8 +148,8 @@ where
     /// The protocol version.
     protocol_version: u32,
 
-    /// The transaction apply stage.
-    apply_stage: ApplyStage,
+    /// The result of applying a transaction to the ledger state.
+    transaction_result: TransactionResult,
 
     /// The transaction identifiers.
     #[debug(skip)]
@@ -218,7 +218,7 @@ where
             hash,
             block_hash,
             protocol_version: ProtocolVersion(protocol_version),
-            apply_stage,
+            transaction_result,
             identifiers,
             raw,
             merkle_tree_root,
@@ -228,7 +228,7 @@ where
         Self {
             hash: hash.hex_encode(),
             protocol_version,
-            apply_stage: apply_stage.into(),
+            transaction_result: transaction_result.into(),
             identifiers: identifiers
                 .into_iter()
                 .map(|identifier| identifier.hex_encode())
@@ -258,22 +258,57 @@ enum TransactionOffset {
     Identifier(HexEncoded),
 }
 
-/// The apply stage of a transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ApplyStage {
-    SucceedEntirely,
-    FailFallible,
-    FailEntirely,
+/// The result of applying a transaction to the ledger state.
+/// In case of a partial success (status), there will be segments.
+#[derive(Debug, Clone, Serialize, Deserialize, SimpleObject)]
+pub struct TransactionResult {
+    pub status: TransactionResultStatus,
+    pub segments: Option<Vec<Segment>>,
 }
 
-scalar!(ApplyStage);
+/// The status of the transaction result: success, partial success or failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Enum)]
+pub enum TransactionResultStatus {
+    Success,
+    PartialSuccess,
+    Failure,
+}
 
-impl From<indexer_common::domain::ApplyStage> for ApplyStage {
-    fn from(apply_stage: indexer_common::domain::ApplyStage) -> Self {
-        match apply_stage {
-            indexer_common::domain::ApplyStage::Success => Self::SucceedEntirely,
-            indexer_common::domain::ApplyStage::PartialSuccess => Self::FailFallible,
-            indexer_common::domain::ApplyStage::Failure => Self::FailEntirely,
+/// One of many segments for a partially successful transaction result showing success for some
+/// segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SimpleObject)]
+pub struct Segment {
+    /// Segment ID.
+    id: u16,
+
+    /// Successful or not.
+    success: bool,
+}
+
+impl From<indexer_common::domain::TransactionResult> for TransactionResult {
+    fn from(transaction_result: indexer_common::domain::TransactionResult) -> Self {
+        match transaction_result {
+            indexer_common::domain::TransactionResult::Success => Self {
+                status: TransactionResultStatus::Success,
+                segments: None,
+            },
+
+            indexer_common::domain::TransactionResult::PartialSuccess(segments) => {
+                let segments = segments
+                    .into_iter()
+                    .map(|(id, success)| Segment { id, success })
+                    .collect();
+
+                Self {
+                    status: TransactionResultStatus::PartialSuccess,
+                    segments: Some(segments),
+                }
+            }
+
+            indexer_common::domain::TransactionResult::Failure => Self {
+                status: TransactionResultStatus::Failure,
+                segments: None,
+            },
         }
     }
 }
