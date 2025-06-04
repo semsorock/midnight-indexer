@@ -14,7 +14,7 @@
 use anyhow::Context;
 use assert_matches::assert_matches;
 use chain_indexer::domain::{
-    Block, BlockInfo, BlockTransactions, Transaction, storage::Storage as _,
+    Block, BlockInfo, BlockTransactions, Transaction, UnshieldedUtxo, storage::Storage as _,
 };
 use fake::{Fake, Faker};
 use futures::{StreamExt, TryStreamExt};
@@ -23,8 +23,9 @@ use indexer_common::{
     self,
     cipher::make_cipher,
     domain::{
-        BlockAuthor, BlockHash, ByteArray, ByteVec, ContractAddress, Identifier, NetworkId,
-        ProtocolVersion, RawTransaction, TransactionHash, TransactionResult,
+        BlockAuthor, BlockHash, ByteArray, ByteVec, ContractAddress, Identifier, IntentHash,
+        NetworkId, ProtocolVersion, RawTokenType, RawTransaction, TransactionHash,
+        TransactionResult, UnshieldedAddress,
     },
     error::BoxError,
     infra::{migrations, pool},
@@ -128,16 +129,20 @@ async fn run_tests(
         .context("get max block height")?;
     assert!(highest_block_hash.is_none());
 
+    let mut block_0 = BLOCK_0.clone();
+    let mut block_1 = BLOCK_1.clone();
+    let mut block_2 = BLOCK_2.clone();
+
     chain_indexer_storage
-        .save_block(&BLOCK_0)
+        .save_block(&mut block_0)
         .await
         .context("save block 0")?;
     chain_indexer_storage
-        .save_block(&BLOCK_1)
+        .save_block(&mut block_1)
         .await
         .context("save block 1")?;
     chain_indexer_storage
-        .save_block(&BLOCK_2)
+        .save_block(&mut block_2)
         .await
         .context("save block 2")?;
 
@@ -508,6 +513,7 @@ static BLOCK_1: LazyLock<Block> = LazyLock::new(|| Block {
     zswap_state_root: Faker.fake(),
     transactions: vec![
         Transaction {
+            id: 0, //they are not saved in the db yet
             hash: TRANSACTION_1_HASH,
             protocol_version: PROTOCOL_VERSION_0_1,
             transaction_result: TransactionResult::Success,
@@ -520,10 +526,20 @@ static BLOCK_1: LazyLock<Block> = LazyLock::new(|| Block {
                 attributes: chain_indexer::domain::ContractAttributes::Deploy,
             }],
             merkle_tree_root: b"merkle_tree_root".as_slice().into(),
+            created_unshielded_utxos: vec![UnshieldedUtxo {
+                creating_transaction_id: 1,
+                output_index: 0,
+                owner_address: OWNER_ADDR_1.clone(),
+                token_type: *TOKEN_NIGHT,
+                intent_hash: *INTENT_HASH,
+                value: 100,
+            }],
+            spent_unshielded_utxos: vec![],
             start_index: 0,
             end_index: 1,
         },
         Transaction {
+            id: 0,
             hash: TRANSACTION_1_HASH,
             protocol_version: PROTOCOL_VERSION_0_1,
             transaction_result: TransactionResult::Failure,
@@ -538,6 +554,15 @@ static BLOCK_1: LazyLock<Block> = LazyLock::new(|| Block {
                 },
             }],
             merkle_tree_root: b"merkle_tree_root".as_slice().into(),
+            created_unshielded_utxos: vec![UnshieldedUtxo {
+                creating_transaction_id: 1,
+                output_index: 0,
+                owner_address: OWNER_ADDR_1.clone(),
+                token_type: *TOKEN_NIGHT,
+                intent_hash: *INTENT_HASH_2,
+                value: 100,
+            }],
+            spent_unshielded_utxos: vec![],
             start_index: 0,
             end_index: 1,
         },
@@ -553,6 +578,7 @@ static BLOCK_2: LazyLock<Block> = LazyLock::new(|| Block {
     timestamp: 2,
     zswap_state_root: Faker.fake(),
     transactions: vec![Transaction {
+        id: 0,
         hash: TRANSACTION_2_HASH,
         protocol_version: PROTOCOL_VERSION_0_1,
         transaction_result: TransactionResult::Success,
@@ -583,6 +609,15 @@ static BLOCK_2: LazyLock<Block> = LazyLock::new(|| Block {
             },
         ],
         merkle_tree_root: b"merkle_tree_root".as_slice().into(),
+        created_unshielded_utxos: vec![UnshieldedUtxo {
+            creating_transaction_id: 2,
+            output_index: 0,
+            owner_address: OWNER_ADDR_2.clone(),
+            token_type: *TOKEN_NIGHT,
+            intent_hash: *INTENT_HASH_3,
+            value: 50,
+        }],
+        spent_unshielded_utxos: vec![sample_spent_utxo()],
         start_index: 2,
         end_index: 3,
     }],
@@ -622,7 +657,22 @@ static UNKNOWN_ADDRESS: LazyLock<ContractAddress> =
     LazyLock::new(|| b"unknown-address".as_slice().into());
 
 pub const PROTOCOL_VERSION_0_1: ProtocolVersion = ProtocolVersion(1_000);
+pub const UT_ADDR_1_HEX: &str = "01020304";
+pub const UT_ADDR_2_HEX: &str = "05060708";
+pub const UT_ADDR_EMPTY_HEX: &str = "11223344"; // Address with no UTXOs for testing
 
+pub static OWNER_ADDR_1: LazyLock<UnshieldedAddress> =
+    LazyLock::new(|| const_hex::decode(UT_ADDR_1_HEX).unwrap().into());
+pub static OWNER_ADDR_2: LazyLock<UnshieldedAddress> =
+    LazyLock::new(|| const_hex::decode(UT_ADDR_2_HEX).unwrap().into());
+pub static OWNER_ADDR_EMPTY: LazyLock<UnshieldedAddress> =
+    LazyLock::new(|| const_hex::decode(UT_ADDR_EMPTY_HEX).unwrap().into());
+
+pub static INTENT_HASH: LazyLock<IntentHash> = LazyLock::new(|| [0x11u8; 32].into());
+pub static INTENT_HASH_2: LazyLock<IntentHash> = LazyLock::new(|| [0x22u8; 32].into());
+pub static INTENT_HASH_3: LazyLock<IntentHash> = LazyLock::new(|| [0x33u8; 32].into());
+
+pub static TOKEN_NIGHT: LazyLock<RawTokenType> = LazyLock::new(|| [0u8; 32].into());
 pub fn create_raw_transaction(_network_id: NetworkId) -> Result<RawTransaction, BoxError> {
     // let empty_offer = Offer::<ProofPreimage> {
     //     inputs: vec![],
@@ -645,4 +695,15 @@ pub fn create_raw_transaction(_network_id: NetworkId) -> Result<RawTransaction, 
     // let raw_transaction = transaction.serialize(network_id)?.into();
 
     Ok(ByteVec::default())
+}
+
+pub fn sample_spent_utxo() -> UnshieldedUtxo {
+    UnshieldedUtxo {
+        creating_transaction_id: 0,
+        output_index: 0,
+        owner_address: OWNER_ADDR_1.clone(),
+        token_type: *TOKEN_NIGHT,
+        intent_hash: *INTENT_HASH,
+        value: 0,
+    }
 }

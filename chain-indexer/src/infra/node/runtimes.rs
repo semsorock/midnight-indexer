@@ -20,12 +20,18 @@ use indexer_common::domain::{
 };
 use itertools::Itertools;
 use parity_scale_codec::Decode;
+use std::collections::HashMap;
 use subxt::{OnlineClient, SubstrateConfig, blocks::Extrinsics, events::Events, utils::H256};
+
+pub type RuntimeUnshieldedUtxoInfo =
+    runtime_0_13::runtime_types::midnight_node_ledger::common::types::UtxoInfo;
 
 /// Runtime specific block details.
 pub struct BlockDetails {
     pub timestamp: Option<u64>,
     pub raw_transactions: Vec<Vec<u8>>,
+    pub created_unshielded_utxos_info: HashMap<[u8; 32], Vec<RuntimeUnshieldedUtxoInfo>>,
+    pub spent_unshielded_utxos_info: HashMap<[u8; 32], Vec<RuntimeUnshieldedUtxoInfo>>,
 }
 
 /// Make block details depending on the given protocol version.
@@ -127,28 +133,46 @@ macro_rules! make_block_details {
                     })
                     .collect();
 
-                let new_session = events
-                    .iter()
-                    .map(|event| event.and_then(|event| event.as_root_event::<Event>()))
-                    .filter_map_ok(|event| match event {
-                        Event::Session(partner_chains_session::Event::NewSession { .. }) => {
-                            Some(())
-                        }
+                let mut created_unshielded_utxos_info: HashMap<[u8; 32], Vec<RuntimeUnshieldedUtxoInfo>> =
+                    HashMap::new();
+                let mut spent_unshielded_utxos_info: HashMap<[u8; 32], Vec<RuntimeUnshieldedUtxoInfo>> =
+                    HashMap::new();
 
-                        _ => None,
-                    })
-                    .next()
-                    .transpose()
-                    .map_err(Box::new)?
-                    .is_some();
-                if new_session {
-                    // Trigger fetching the authorities next time.
-                    *authorities = None;
+                let mut current_tx_hash: Option<[u8; 32]> = None;
+
+                for event in events.iter().flatten() {
+                    if let Ok(root_event) = event.as_root_event::<Event>() {
+                        match root_event {
+                            Event::Session(partner_chains_session::Event::NewSession { .. }) => {
+                                *authorities = None;
+                            }
+                            Event::Midnight(midnight::Event::TxApplied(tx_applied)) => {
+                                current_tx_hash = Some(tx_applied.tx_hash);
+                            }
+                            Event::Midnight(midnight::Event::TxPartialSuccess(tx_partial)) => {
+                                current_tx_hash = Some(tx_partial.tx_hash);
+                            }
+                            Event::Midnight(midnight::Event::UnshieldedTokens(event_data)) => {
+                                // Use the most recent transaction hash
+                                if let Some(tx_hash) = current_tx_hash {
+                                    if !event_data.created.is_empty() {
+                                        created_unshielded_utxos_info.insert(tx_hash, event_data.created);
+                                    }
+                                    if !event_data.spent.is_empty() {
+                                        spent_unshielded_utxos_info.insert(tx_hash, event_data.spent);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
                 Ok(BlockDetails {
                     timestamp,
                     raw_transactions,
+                    created_unshielded_utxos_info,
+                    spent_unshielded_utxos_info,
                 })
             }
         }

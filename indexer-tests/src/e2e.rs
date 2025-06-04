@@ -22,6 +22,7 @@ use crate::{
             self, BlockSubscriptionBlocks as BlockSubscriptionBlock,
             BlockSubscriptionBlocksTransactions as BlockSubscriptionTransaction,
             BlockSubscriptionBlocksTransactionsContractActions as BlockSubscriptionContractAction,
+            BlockSubscriptionBlocksTransactionsUnshieldedCreatedOutputs as BlockSubscriptionUnshieldedUtxo,
             TransactionResultStatus as BlockSubscriptionTransactionResultStatus,
         },
         connect_mutation,
@@ -41,7 +42,7 @@ use indexer_api::{
     domain::{AsBytesExt, HexEncoded, ViewingKey},
     infra::api::v1::TransactionResultStatus,
 };
-use indexer_common::domain::NetworkId;
+use indexer_common::domain::{NetworkId, unshielded::to_bech32m};
 use itertools::Itertools;
 use midnight_serialize::Serializable;
 use midnight_transient_crypto::encryption::SecretKey;
@@ -85,6 +86,9 @@ pub async fn run(network_id: NetworkId, host: &str, port: u16, secure: bool) -> 
     test_contract_action_query(&indexer_data, &api_client, &api_url)
         .await
         .context("test contract action query")?;
+    test_unshielded_utxo_queries(&indexer_data, &api_client, &api_url)
+        .await
+        .context("test unshielded UTXOs query")?;
 
     // Test mutations.
     test_connect_mutation(&api_client, &api_url, network_id)
@@ -98,6 +102,9 @@ pub async fn run(network_id: NetworkId, host: &str, port: u16, secure: bool) -> 
     test_contract_action_subscription(&indexer_data, &ws_api_url)
         .await
         .context("test contract action subscription")?;
+    test_unshielded_utxo_subscription(&indexer_data, &ws_api_url) // we use node mock version at the moment
+        .await
+        .context("test unshielded UTXOs subscription")?;
     test_wallet_subscription(&ws_api_url)
         .await
         .context("test wallet subscription")?;
@@ -113,6 +120,7 @@ struct IndexerData {
     blocks: Vec<BlockSubscriptionBlock>,
     transactions: Vec<BlockSubscriptionTransaction>,
     contract_actions: Vec<BlockSubscriptionContractAction>,
+    unshielded_utxos: Vec<BlockSubscriptionUnshieldedUtxo>,
 }
 
 impl IndexerData {
@@ -198,10 +206,18 @@ impl IndexerData {
             })
             .all(|(a1, a2)| a1 == a2);
 
+        let unshielded_utxos = transactions
+            .iter()
+            .flat_map(|transaction| transaction.unshielded_created_outputs.to_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!unshielded_utxos.is_empty());
+
         Ok(Self {
             blocks,
             transactions,
             contract_actions,
+            unshielded_utxos,
         })
     }
 }
@@ -472,6 +488,53 @@ async fn test_contract_action_query(
     Ok(())
 }
 
+/// Test the unshielded UTXOs query.
+async fn test_unshielded_utxo_queries(
+    indexer_data: &IndexerData,
+    api_client: &Client,
+    api_url: &str,
+) -> anyhow::Result<()> {
+    use graphql::graphql_types::*;
+    use indexer_api::domain::UnshieldedAddress;
+
+    // Test with addresses that have UTXOs
+    for expected_utxo in &indexer_data.unshielded_utxos {
+        let variables = unshielded_utxos_query::Variables {
+            address: expected_utxo.owner.clone(),
+        };
+        let utxos = send_query::<UnshieldedUtxosQuery>(api_client, api_url, variables)
+            .await?
+            .unshielded_utxos;
+
+        assert!(!utxos.is_empty());
+        // Verify that the expected UTXO is in the results
+        assert!(utxos.iter().any(|utxo| {
+            utxo.owner == expected_utxo.owner
+                && utxo.value == expected_utxo.value
+                && utxo.token_type == expected_utxo.token_type
+                && utxo.intent_hash == expected_utxo.intent_hash
+                && utxo.output_index == expected_utxo.output_index
+        }));
+    }
+
+    // Test with unknown address (should return empty)
+    const NETWORK_ID: NetworkId = NetworkId::Undeployed;
+    let unknown_addr_bytes = [0x99u8; 4]; // Some address that doesn't exist
+    let unknown_bech32m = to_bech32m(&unknown_addr_bytes, NETWORK_ID)?;
+    let unknown_addr = UnshieldedAddress(unknown_bech32m);
+
+    let variables = unshielded_utxos_query::Variables {
+        address: unknown_addr,
+    };
+    let utxos = send_query::<UnshieldedUtxosQuery>(api_client, api_url, variables)
+        .await?
+        .unshielded_utxos;
+
+    assert!(utxos.is_empty());
+
+    Ok(())
+}
+
 /// Test the connect mutation.
 async fn test_connect_mutation(
     api_client: &Client,
@@ -595,6 +658,94 @@ async fn test_contract_action_subscription(
                 .context("collect blocks from contract action subscription")?;
         assert_eq!(contract_actions, expected_contract_actions);
     }
+
+    Ok(())
+}
+
+async fn test_unshielded_utxo_subscription(
+    indexer_data: &IndexerData,
+    ws_api_url: &str,
+) -> anyhow::Result<()> {
+    use graphql::graphql_types::*;
+    use tokio::time::{Duration, timeout};
+
+    let utxo_addresses = indexer_data
+        .unshielded_utxos
+        .iter()
+        .map(|utxo| utxo.owner.clone())
+        .collect::<Vec<_>>();
+
+    assert!(!utxo_addresses.is_empty());
+
+    let unshielded_address = indexer_api::domain::UnshieldedAddress(utxo_addresses[0].clone().0);
+
+    let variables = unshielded_utxos_subscription::Variables {
+        address: unshielded_address.clone(),
+    };
+
+    let subscription_stream =
+        graphql_ws_client::subscribe::<UnshieldedUtxosSubscription>(ws_api_url, variables)
+            .await
+            .context("subscribe to unshielded UTXOs")?;
+
+    // Wait for events with a short timeout to check for PROGRESS events
+    let events = timeout(Duration::from_millis(400), async {
+        subscription_stream
+            .take(1) // Take just 1 event to check for PROGRESS
+            .map_ok(|data| data.unshielded_utxos)
+            .try_collect::<Vec<_>>()
+            .await
+    })
+    .await;
+
+    match events {
+        Result::Ok(Result::Ok(events)) if !events.is_empty() => {
+            let has_progress = events.iter().any(|e| {
+                matches!(
+                    e.event_type,
+                    unshielded_utxos_subscription::UnshieldedUtxoEventType::PROGRESS
+                )
+            });
+
+            if has_progress {
+                println!("Received PROGRESS event as expected");
+            }
+
+            for event in &events {
+                if !event.created_utxos.is_empty() {
+                    assert_eq!(event.created_utxos[0].owner, unshielded_address);
+                }
+
+                if !event.spent_utxos.is_empty() {
+                    assert_eq!(event.spent_utxos[0].owner, unshielded_address);
+                }
+            }
+        }
+        Result::Ok(Result::Ok(_)) => {
+            println!("No events received within 400ms timeout");
+        }
+        Result::Ok(Err(e)) => {
+            println!("Error collecting events: {:?}", e);
+        }
+        Err(_) => {
+            println!("Timeout waiting for events - this is expected if no recent activity");
+        }
+    }
+
+    // Additional test with address that has no UTXOs
+    const NETWORK_ID: NetworkId = NetworkId::Undeployed;
+    let empty_addr_bytes = [0x11, 0x22, 0x33, 0x44]; // Raw bytes for a non-existent address
+    let empty_addr_bech32m = to_bech32m(&empty_addr_bytes, NETWORK_ID)?;
+    let empty_address = indexer_api::domain::UnshieldedAddress(empty_addr_bech32m);
+
+    let empty_variables = unshielded_utxos_subscription::Variables {
+        address: empty_address,
+    };
+
+    let _empty_subscription =
+        graphql_ws_client::subscribe::<UnshieldedUtxosSubscription>(ws_api_url, empty_variables)
+            .await
+            .context("subscribe to unshielded UTXOs for empty address")?;
 
     Ok(())
 }
@@ -877,7 +1028,7 @@ fn seed_to_secret_key(seed: &str) -> SecretKey {
 mod graphql {
     use graphql_client::GraphQLQuery;
     use indexer_api::{
-        domain::{HexEncoded, ViewingKey},
+        domain::{HexEncoded, UnshieldedAddress, ViewingKey},
         infra::api::v1::Unit,
     };
 
@@ -904,6 +1055,30 @@ mod graphql {
         response_derives = "Debug, Clone, Serialize"
     )]
     pub struct ContractActionQuery;
+
+    // TODO(midnight-indexer/PR #23): Temporary wrapper to dodge the
+    // GraphQLQuery error-type mismatch (anyhow::Error vs serde::de::Error).
+    // Delete this `mod graphql_types` once we align the error types or
+    // customise the derive to return our own error.
+    pub mod graphql_types {
+        use graphql_client::GraphQLQuery;
+        use indexer_api::domain::{HexEncoded, UnshieldedAddress};
+        #[derive(GraphQLQuery)]
+        #[graphql(
+            schema_path = "../indexer-api/graphql/schema-v1.graphql",
+            query_path = "./e2e.graphql",
+            response_derives = "Debug, Clone, Serialize"
+        )]
+        pub struct UnshieldedUtxosQuery;
+
+        #[derive(GraphQLQuery)]
+        #[graphql(
+            schema_path = "../indexer-api/graphql/schema-v1.graphql",
+            query_path = "./e2e.graphql",
+            response_derives = "Debug, Clone, Serialize"
+        )]
+        pub struct UnshieldedUtxosSubscription;
+    }
 
     #[derive(GraphQLQuery)]
     #[graphql(

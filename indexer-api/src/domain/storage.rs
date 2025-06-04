@@ -11,10 +11,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::domain::{Block, BlockHash, ContractAction, Transaction};
+use crate::domain::{Block, BlockHash, ContractAction, Transaction, UnshieldedUtxo};
 use futures::{Stream, stream};
-use indexer_common::domain::{ContractAddress, Identifier, SessionId, TransactionHash, ViewingKey};
+use indexer_common::domain::{
+    ContractAddress, Identifier, SessionId, TransactionHash, UnshieldedAddress, ViewingKey,
+};
 use std::{fmt::Debug, num::NonZeroU32};
+
+/// Filter criteria for unshielded UTXOs queries
+#[derive(Debug, Clone)]
+pub enum UnshieldedUtxoFilter<'a> {
+    /// All UTXOs (no filter)
+    All,
+    /// UTXOs created by a specific transaction
+    CreatedByTx(u64),
+    /// UTXOs spent by a specific transaction
+    SpentByTx(u64),
+    /// UTXOs created in a specific transaction for a specific address
+    CreatedInTxForAddress(u64),
+    /// UTXOs spent in a specific transaction for a specific address
+    SpentInTxForAddress(u64),
+    /// UTXOs created/spent in blocks with height >= the given value
+    FromHeight(u32),
+    /// UTXOs created/spent in a specific block
+    FromBlockHash(&'a BlockHash),
+    /// UTXOs created/spent in a transaction with given hash
+    FromTxHash(&'a TransactionHash),
+    /// UTXOs created/spent in a transaction with given identifier
+    FromTxIdentifier(&'a Identifier),
+}
 
 /// Storage abstraction.
 #[trait_variant::make(Send)]
@@ -141,6 +166,20 @@ where
 
     /// Set the wallet active at the current timestamp to avoid timing out.
     async fn set_wallet_active(&self, session_id: SessionId) -> Result<(), sqlx::Error>;
+
+    /// Get unshielded UTXOs based on filter criteria.
+    /// This consolidated method replaces multiple specific UTXO query methods.
+    async fn get_unshielded_utxos(
+        &self,
+        address: Option<&UnshieldedAddress>,
+        filter: UnshieldedUtxoFilter<'_>,
+    ) -> Result<Vec<UnshieldedUtxo>, sqlx::Error>;
+
+    /// Get all transactions that create or spend unshielded UTXOs for the given address.
+    async fn get_transactions_involving_unshielded(
+        &self,
+        address: &UnshieldedAddress,
+    ) -> Result<Vec<Transaction>, sqlx::Error>;
 }
 
 /// Just needed as a type argument for `infra::api::export_schema` which should not depend on any
@@ -302,6 +341,23 @@ impl Storage for NoopStorage {
 
     #[cfg_attr(coverage, coverage(off))]
     async fn set_wallet_active(&self, session_id: SessionId) -> Result<(), sqlx::Error> {
+        unimplemented!()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    async fn get_unshielded_utxos(
+        &self,
+        address: Option<&UnshieldedAddress>,
+        filter: UnshieldedUtxoFilter<'_>,
+    ) -> Result<Vec<UnshieldedUtxo>, sqlx::Error> {
+        unimplemented!()
+    }
+
+    #[cfg_attr(coverage, coverage(off))]
+    async fn get_transactions_involving_unshielded(
+        &self,
+        address: &UnshieldedAddress,
+    ) -> Result<Vec<Transaction>, sqlx::Error> {
         unimplemented!()
     }
 }

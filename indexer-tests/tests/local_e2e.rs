@@ -252,6 +252,7 @@ async fn start_indexer_api(
         ),
         ("APP__INFRA__API__PORT", api_port.to_string()),
         ("APP__INFRA__API__MAX_COMPLEXITY", "500".to_string()),
+        ("APP__INFRA__NETWORK_ID", "Undeployed".to_string()),
         ("APP__INFRA__PUB_SUB__URL", nats_url.to_owned()),
         ("APP__INFRA__STORAGE__PORT", postgres_port.to_string()),
         ("APP__INFRA__LEDGER_STATE_STORAGE__URL", nats_url.to_owned()),

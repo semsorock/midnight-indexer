@@ -12,13 +12,14 @@
 // limitations under the License.
 
 use crate::domain::{
-    Block, BlockInfo, BlockTransactions, ContractAction, Transaction, storage::Storage,
+    Block, BlockInfo, BlockTransactions, ContractAction, Transaction, UnshieldedUtxo,
+    storage::Storage,
 };
 use fastrace::trace;
 use futures::{StreamExt, TryStreamExt};
 use indexer_common::{
     domain::{ByteArray, ByteVec, ContractActionVariant},
-    infra::pool::postgres::PostgresPool,
+    infra::{pool::postgres::PostgresPool, sqlx::U128BeBytes},
 };
 use indoc::indoc;
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow, types::Json};
@@ -103,12 +104,29 @@ impl Storage for PostgresStorage {
     }
 
     #[trace]
-    async fn save_block(&self, block: &Block) -> Result<Option<u64>, sqlx::Error> {
+    async fn save_block(&self, block: &mut Block) -> Result<Option<u64>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let max_transaction_id = save_block(block, &mut tx).await?;
+        let (max_transaction_id, transaction_ids) = save_block(block, &mut tx).await?;
         tx.commit().await?;
 
+        // Update the block's transactions with their database IDs
+        for (transaction, id) in block.transactions.iter_mut().zip(transaction_ids.iter()) {
+            transaction.id = *id as u64;
+        }
+
         Ok(max_transaction_id)
+    }
+
+    #[trace]
+    async fn save_unshielded_utxos(
+        &self,
+        utxos: &[UnshieldedUtxo],
+        transaction_id: &i64,
+        spent: bool,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        save_unshielded_utxos(utxos, transaction_id, spent, &mut tx).await?;
+        tx.commit().await
     }
 
     #[trace(properties = { "block_height": "{block_height}" })]
@@ -153,7 +171,7 @@ impl Storage for PostgresStorage {
 }
 
 #[trace]
-async fn save_block(block: &Block, tx: &mut Tx) -> Result<Option<u64>, sqlx::Error> {
+async fn save_block(block: &Block, tx: &mut Tx) -> Result<(Option<u64>, Vec<i64>), sqlx::Error> {
     let query = indoc! {"
         INSERT INTO blocks (
             hash,
@@ -197,9 +215,9 @@ async fn save_transactions(
     transactions: &[Transaction],
     block_id: i64,
     tx: &mut Tx,
-) -> Result<Option<u64>, sqlx::Error> {
+) -> Result<(Option<u64>, Vec<i64>), sqlx::Error> {
     if transactions.is_empty() {
-        return Ok(None);
+        return Ok((None, vec![]));
     }
 
     let query = indoc! {"
@@ -248,9 +266,81 @@ async fn save_transactions(
 
     for (transaction, transaction_id) in transactions.iter().zip(transaction_ids.iter()) {
         save_contract_actions(&transaction.contract_actions, *transaction_id, tx).await?;
+
+        save_unshielded_utxos(
+            &transaction.created_unshielded_utxos,
+            transaction_id,
+            false,
+            tx,
+        )
+        .await?;
+
+        save_unshielded_utxos(
+            &transaction.spent_unshielded_utxos,
+            transaction_id,
+            true,
+            tx,
+        )
+        .await?;
     }
 
-    Ok(transaction_ids.into_iter().max().map(|n| n as u64))
+    let max_id = transaction_ids.iter().max().copied().map(|n| n as u64);
+    Ok((max_id, transaction_ids))
+}
+
+#[trace]
+async fn save_unshielded_utxos(
+    utxos: &[UnshieldedUtxo],
+    transaction_id: &i64,
+    spent: bool,
+    tx: &mut Tx,
+) -> Result<(), sqlx::Error> {
+    if utxos.is_empty() {
+        return Ok(());
+    }
+
+    if spent {
+        for utxo_info_for_spending in utxos {
+            let query = indoc! {"
+                INSERT INTO unshielded_utxos
+                (creating_transaction_id, output_index, owner_address, token_type, intent_hash, value, spending_transaction_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (intent_hash, output_index)
+                DO UPDATE SET spending_transaction_id = $7
+                WHERE unshielded_utxos.spending_transaction_id IS NULL
+            "};
+
+            sqlx::query(query)
+                .bind(*transaction_id)
+                .bind(utxo_info_for_spending.output_index as i32)
+                .bind(&utxo_info_for_spending.owner_address)
+                .bind(utxo_info_for_spending.token_type)
+                .bind(utxo_info_for_spending.intent_hash)
+                .bind(U128BeBytes::from(utxo_info_for_spending.value))
+                .bind(transaction_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+    } else {
+        let query_base = indoc! {"
+            INSERT INTO unshielded_utxos
+             (creating_transaction_id, output_index, owner_address, token_type, intent_hash, value)
+        "};
+        let mut query_builder = QueryBuilder::new(query_base);
+        query_builder.push_values(utxos.iter(), |mut q, utxo| {
+            q.push_bind(transaction_id)
+                .push_bind(utxo.output_index as i32)
+                .push_bind(&utxo.owner_address)
+                .push_bind(utxo.token_type)
+                .push_bind(utxo.intent_hash)
+                .push_bind(U128BeBytes::from(utxo.value));
+        });
+
+        let query = query_builder.build();
+        query.execute(&mut **tx).await?;
+    }
+
+    Ok(())
 }
 
 #[trace(properties = { "transaction_id": "{transaction_id}" })]

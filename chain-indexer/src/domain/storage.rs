@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::domain::{Block, BlockInfo, BlockTransactions};
+use crate::domain::{Block, BlockInfo, BlockTransactions, UnshieldedUtxo};
 
 /// Storage abstraction.
 #[trait_variant::make(Send)]
@@ -28,8 +28,15 @@ where
     /// Get the number of stored contract actions: deploys, calls, updates.
     async fn get_contract_action_count(&self) -> Result<(u64, u64, u64), sqlx::Error>;
 
-    /// Save the given [Block] and return the max transaction ID.
-    async fn save_block(&self, block: &Block) -> Result<Option<u64>, sqlx::Error>;
+    /// Save the given [Block], update transaction IDs, and return the max transaction ID.
+    async fn save_block(&self, block: &mut Block) -> Result<Option<u64>, sqlx::Error>;
+
+    async fn save_unshielded_utxos(
+        &self,
+        utxos: &[UnshieldedUtxo],
+        transaction_id: &i64,
+        spent: bool,
+    ) -> Result<(), sqlx::Error>;
 
     /// Get all transactions with additional block data for the given block height.
     async fn get_block_transactions(

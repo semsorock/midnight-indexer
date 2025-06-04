@@ -16,7 +16,10 @@ mod runtimes;
 
 use crate::{
     domain::{Block, BlockInfo, ContractAction, ContractAttributes, Node, Transaction},
-    infra::node::{header::SubstrateHeaderExt, runtimes::BlockDetails},
+    infra::node::{
+        header::SubstrateHeaderExt,
+        runtimes::{BlockDetails, RuntimeUnshieldedUtxoInfo},
+    },
 };
 use async_stream::try_stream;
 use fastrace::trace;
@@ -24,8 +27,8 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use indexer_common::{
     LedgerTransaction,
     domain::{
-        BlockAuthor, BlockHash, ByteVec, NetworkId, ProtocolVersion, RawTransaction,
-        ScaleDecodeProtocolVersionError,
+        BlockAuthor, BlockHash, ByteVec, IntentHash, NetworkId, ProtocolVersion, RawTokenType,
+        RawTransaction, ScaleDecodeProtocolVersionError, TransactionHash, UnshieldedAddress,
     },
     error::{BoxError, StdErrorExt},
     serialize::SerializableExt,
@@ -38,6 +41,7 @@ use midnight_storage::DefaultDB;
 use midnight_transient_crypto::merkle_tree::MerkleTreeDigest;
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     future::ready,
     io::{self},
     time::Duration,
@@ -254,6 +258,8 @@ impl SubxtNode {
         let BlockDetails {
             timestamp,
             raw_transactions,
+            created_unshielded_utxos_info,
+            spent_unshielded_utxos_info,
         } = runtimes::make_block_details(extrinsics, events, authorities, protocol_version).await?;
 
         let mut transactions = Vec::with_capacity(raw_transactions.len());
@@ -263,6 +269,8 @@ impl SubxtNode {
                 raw_transaction,
                 hash,
                 protocol_version,
+                &created_unshielded_utxos_info,
+                &spent_unshielded_utxos_info,
                 network_id,
                 online_client,
             )
@@ -526,6 +534,8 @@ async fn make_transaction(
     raw_transaction: Vec<u8>,
     block_hash: BlockHash,
     protocol_version: ProtocolVersion,
+    created_info_map: &HashMap<[u8; 32], Vec<RuntimeUnshieldedUtxoInfo>>,
+    spent_info_map: &HashMap<[u8; 32], Vec<RuntimeUnshieldedUtxoInfo>>,
     network_id: NetworkId,
     online_client: &OnlineClient<SubstrateConfig>,
 ) -> Result<Option<Transaction>, SubxtNodeError> {
@@ -549,7 +559,7 @@ async fn make_transaction(
         deserialize::<LedgerTransaction, _>(&mut raw.as_ref(), network_id.into())
             .map_err(|error| SubxtNodeError::Io("cannot deserialize ledger transaction", error))?;
 
-    let hash = ledger_transaction.transaction_hash().0.0.into();
+    let hash: TransactionHash = ledger_transaction.transaction_hash().0.0.into();
 
     let identifiers = ledger_transaction
         .identifiers()
@@ -585,7 +595,36 @@ async fn make_transaction(
         LedgerTransaction::ClaimMint(_) => vec![],
     };
 
+    let created_unshielded_utxos = created_info_map
+        .get(hash.as_ref())
+        .map_or(&[] as &[_], |v| v.as_slice())
+        .iter()
+        .map(|info| crate::domain::UnshieldedUtxo {
+            creating_transaction_id: 0,
+            output_index: info.output_no,
+            owner_address: UnshieldedAddress::from(info.address.as_ref()),
+            token_type: RawTokenType::from(info.token_type),
+            intent_hash: IntentHash::from(info.intent_hash),
+            value: info.value,
+        })
+        .collect();
+
+    let spent_unshielded_utxos = spent_info_map
+        .get(hash.as_ref())
+        .map_or(&[] as &[_], |v| v.as_slice())
+        .iter()
+        .map(|info| crate::domain::UnshieldedUtxo {
+            creating_transaction_id: 0,
+            output_index: info.output_no,
+            owner_address: UnshieldedAddress::from(info.address.as_ref()),
+            token_type: RawTokenType::from(info.token_type),
+            intent_hash: IntentHash::from(info.intent_hash),
+            value: info.value,
+        })
+        .collect();
+
     let transaction = Transaction {
+        id: 0,
         hash,
         transaction_result: Default::default(),
         protocol_version,
@@ -595,6 +634,8 @@ async fn make_transaction(
         merkle_tree_root: Default::default(),
         start_index: Default::default(),
         end_index: Default::default(),
+        created_unshielded_utxos,
+        spent_unshielded_utxos,
     };
 
     Ok(Some(transaction))
@@ -689,9 +730,9 @@ mod tests {
         test_finalized_blocks(
             PROTOCOL_VERSION_000_013_000,
             Some("alpha.1"),
-            "4cd31d3f8531fbaeadb07ba59f151fc8e8fff7a4f87b381edc561d41cb8c8d5c",
+            "4b88d38dd59b0f5e9deffda46e20d23f194efa65bf2e1c029411cd9537c7777d",
             8,
-            "8e8b4a1a3c6828f5dda24a794377b5bfda540174cb4ae7ef19924537d9b19aa9",
+            "519d12a758644f193d635a020bb4ad5c125423db0a69089741264e1015cd39b3",
             27,
         )
         .await
@@ -777,7 +818,7 @@ mod tests {
             .into_iter()
             .flat_map(|block| block.transactions)
             .collect::<Vec<_>>();
-        assert_eq!(transactions.len(), 10); // 1 initial, 6 zswap transactions, 3 contract actions.
+        assert_eq!(transactions.len(), 9); // 6 unshielded token transactions, 3 contract actions.
 
         assert_matches!(
             transactions.as_slice(),
@@ -787,7 +828,6 @@ mod tests {
                     contract_actions: contract_actions_0,
                     ..
                 },
-                Transaction {..},
                 Transaction {..},
                 Transaction {..},
                 Transaction {..},

@@ -14,6 +14,7 @@
 mod bytes;
 mod protocol_version;
 mod pub_sub;
+pub mod unshielded;
 mod viewing_key;
 mod zswap;
 
@@ -38,9 +39,12 @@ pub type ContractEntryPoint = ByteVec;
 pub type ContractState = ByteVec;
 pub type ContractZswapState = ByteVec;
 pub type Identifier = ByteVec;
+pub type IntentHash = ByteArray<32>;
 pub type MerkleTreeRoot = ByteVec;
+pub type RawTokenType = ByteArray<32>;
 pub type RawTransaction = ByteVec;
 pub type SessionId = ByteArray<32>;
+pub type UnshieldedAddress = ByteVec;
 
 /// The result of applying a transaction to the ledger state.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

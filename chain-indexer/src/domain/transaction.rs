@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::domain::ContractAction;
+use crate::domain::{ContractAction, UnshieldedUtxo};
 use indexer_common::domain::{
     ByteArray, Identifier, MerkleTreeRoot, ProtocolVersion, RawTransaction, TransactionHash,
     TransactionResult,
@@ -22,12 +22,15 @@ use std::fmt::Debug;
 /// Relevant transaction data from the perspective of the Chain Indexer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
+    pub id: u64, // 0 = not yet saved; valid DB IDs start from 1
     pub hash: TransactionHash,
     pub protocol_version: ProtocolVersion,
     pub transaction_result: TransactionResult,
     pub identifiers: Vec<Identifier>,
     pub raw: RawTransaction,
     pub contract_actions: Vec<ContractAction>,
+    pub created_unshielded_utxos: Vec<UnshieldedUtxo>,
+    pub spent_unshielded_utxos: Vec<UnshieldedUtxo>,
     pub merkle_tree_root: MerkleTreeRoot,
     pub start_index: u64,
     pub end_index: u64,
