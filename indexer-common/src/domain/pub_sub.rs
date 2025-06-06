@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::domain::SessionId;
+use crate::domain::{SessionId, UnshieldedAddress};
 use derive_more::derive::From;
 use futures::{Stream, stream};
 use serde::{Deserialize, Serialize};
@@ -55,12 +55,10 @@ pub struct WalletIndexed {
 message!(WalletIndexed);
 
 /// Emitted when a transaction affecting unshielded UTXOs for a concrete address
-/// has been stored in the DB.  `address_bech32m` uses the same text
-/// representation the GraphQL scalar expects, so the subscription layer never
-/// needs to guess the network prefix.
+/// has been stored in the DB.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnshieldedUtxoIndexed {
-    pub address_bech32m: String,
+    pub address: UnshieldedAddress,
     pub transaction_id: u64,
 }
 message!(UnshieldedUtxoIndexed);
