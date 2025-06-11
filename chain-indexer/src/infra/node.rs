@@ -15,7 +15,9 @@ mod header;
 mod runtimes;
 
 use crate::{
-    domain::{Block, BlockInfo, ContractAction, ContractAttributes, Node, Transaction},
+    domain::{
+        Block, BlockInfo, ContractAction, ContractAttributes, Node, Transaction, TransactionFees,
+    },
     infra::node::{
         header::SubstrateHeaderExt,
         runtimes::{BlockDetails, UtxoInfo},
@@ -482,6 +484,9 @@ pub enum SubxtNodeError {
     #[error("cannot get zswap state root: {0}")]
     GetZswapStateRoot(String),
 
+    #[error("cannot get transaction cost: {0}")]
+    GetTransactionCost(#[source] Box<subxt::Error>),
+
     #[error("block with hash {0} not found")]
     BlockNotFound(BlockHash),
 
@@ -573,7 +578,7 @@ async fn make_transaction(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let contract_actions = match ledger_transaction {
+    let contract_actions = match &ledger_transaction {
         LedgerTransaction::Standard(standard_transaction) => {
             let contract_actions = standard_transaction.actions().map(|(_, action)| action);
 
@@ -623,6 +628,33 @@ async fn make_transaction(
         })
         .collect();
 
+    let fees = match runtimes::get_transaction_cost(
+        online_client,
+        raw.as_ref(),
+        block_hash,
+        protocol_version,
+    )
+    .await
+    {
+        Ok(fees) => TransactionFees {
+            paid_fees: fees,
+            estimated_fees: fees,
+        },
+
+        Err(error) => {
+            warn!(
+                "runtime API fees calculation failed, using fallback: {}, block_hash = {}, transaction_size = {}",
+                error,
+                block_hash,
+                raw.as_ref().len()
+            );
+            TransactionFees::extract_from_ledger_transaction(
+                &ledger_transaction,
+                raw.as_ref().len(),
+            )
+        }
+    };
+
     let transaction = Transaction {
         id: 0,
         hash,
@@ -636,6 +668,8 @@ async fn make_transaction(
         end_index: Default::default(),
         created_unshielded_utxos,
         spent_unshielded_utxos,
+        paid_fees: fees.paid_fees,
+        estimated_fees: fees.estimated_fees,
     };
 
     Ok(Some(transaction))

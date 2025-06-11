@@ -162,6 +162,12 @@ where
     /// The result of applying a transaction to the ledger state.
     transaction_result: TransactionResult,
 
+    /// Fee information for this transaction.
+    fees: TransactionFees,
+
+    /// Segment results for client consumption.
+    segment_results: Vec<SegmentResult>,
+
     /// The transaction identifiers.
     #[debug(skip)]
     identifiers: Vec<HexEncoded>,
@@ -274,10 +280,37 @@ where
             ..
         } = value;
 
+        // Use fees information from database (calculated by chain-indexer)
+        let fees = TransactionFees {
+            paid_fees: value
+                .paid_fees
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "0".to_owned()),
+            estimated_fees: value
+                .estimated_fees
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "0".to_owned()),
+        };
+
+        // Convert segment results for client consumption
+        let segment_results = match &transaction_result {
+            indexer_common::domain::TransactionResult::PartialSuccess(segments) => segments
+                .iter()
+                .map(|(segment_id, success)| SegmentResult {
+                    segment_id: *segment_id,
+                    success: *success,
+                })
+                .collect(),
+            indexer_common::domain::TransactionResult::Success => vec![],
+            indexer_common::domain::TransactionResult::Failure => vec![],
+        };
+
         Self {
             hash: hash.hex_encode(),
             protocol_version,
             transaction_result: transaction_result.into(),
+            fees,
+            segment_results,
             identifiers: identifiers
                 .into_iter()
                 .map(|identifier| identifier.hex_encode())
@@ -331,6 +364,24 @@ pub struct Segment {
     id: u16,
 
     /// Successful or not.
+    success: bool,
+}
+
+/// Fees information for a transaction, including both paid and estimated fees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SimpleObject)]
+pub struct TransactionFees {
+    /// The actual fees paid for this transaction in DUST.
+    paid_fees: String,
+    /// The estimated fees that was calculated for this transaction in DUST.
+    estimated_fees: String,
+}
+
+/// Result for a specific segment within a transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SimpleObject)]
+pub struct SegmentResult {
+    /// The segment identifier.
+    segment_id: u16,
+    /// Whether this segment was successfully executed.
     success: bool,
 }
 
@@ -752,6 +803,7 @@ struct ViewingUpdate<S: Storage> {
 }
 
 #[derive(Debug, Union)]
+#[allow(clippy::large_enum_variant)]
 enum ZswapChainStateUpdate<S: Storage> {
     MerkleTreeCollapsedUpdate(MerkleTreeCollapsedUpdate),
     RelevantTransaction(RelevantTransaction<S>),
