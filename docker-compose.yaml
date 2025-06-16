@@ -142,3 +142,41 @@ services:
       CFG_PRESET: "dev"
     security_opt:
       - no-new-privileges:true
+
+  mcp-server:
+    # Experimental Model Context Protocol server to give AI clients safe, read-only access
+    # to the Midnight GraphQL API exposed by the `indexer-api` container.
+    # Docs: https://www.apollographql.com/docs/apollo-mcp-server/
+    image: "ghcr.io/apollographql/apollo-mcp-server:latest"
+    depends_on:
+      indexer-api:
+        condition: "service_healthy"
+    environment:
+      # Enable debug logging
+      RUST_LOG: "debug"
+      # Set the GraphQL endpoint
+      APOLLO_MCP_SERVER_ENDPOINT: "http://indexer-api:8088/api/v1/graphql"
+      # Enable introspection
+      APOLLO_MCP_SERVER_INTROSPECTION: "true"
+    command:
+      - "--endpoint"
+      - "http://indexer-api:8088/api/v1/graphql"
+      - "--introspection"
+      - "--log"
+      - "debug"
+      - "--schema"
+      - "/data/schema-v1.graphql"
+      - "--operations"
+      - "/data/operations"
+    restart: "no"
+    # Expose on a non-conflicting host port (5001 → 5000 in the container)
+    ports:
+      - "5001:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/mcp" ]
+      interval: "10s"
+      timeout: "3s"
+      retries: 3
+    volumes:
+      - "./indexer-api/graphql/schema-v1.graphql:/data/schema-v1.graphql"
+      - "./indexer-api/graphql/operations:/data/operations"

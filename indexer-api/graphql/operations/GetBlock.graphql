@@ -1,0 +1,23 @@
+query GetBlock($offset: BlockOffset) {
+  block(offset: $offset) {
+    hash
+    height
+    protocolVersion
+    timestamp
+    author
+    parent {
+      hash
+      height
+    }
+    transactions {
+      hash
+      protocolVersion
+      applyStage
+      identifiers
+      merkleTreeRoot
+      contractActions {
+        address
+      }
+    }
+  }
+}

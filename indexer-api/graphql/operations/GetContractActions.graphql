@@ -1,0 +1,32 @@
+query GetContractActions($address: HexEncoded!) {
+  contractAction(address: $address) {
+    ... on ContractCall {
+      address
+      state
+      chainState
+      entryPoint
+      transaction {
+        hash
+        protocolVersion
+      }
+    }
+    ... on ContractDeploy {
+      address
+      state
+      chainState
+      transaction {
+        hash
+        protocolVersion
+      }
+    }
+    ... on ContractUpdate {
+      address
+      state
+      chainState
+      transaction {
+        hash
+        protocolVersion
+      }
+    }
+  }
+}

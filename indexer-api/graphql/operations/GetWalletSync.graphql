@@ -1,0 +1,28 @@
+subscription GetWalletSync($sessionId: HexEncoded!) {
+  wallet(sessionId: $sessionId, sendProgressUpdates: true) {
+    ... on ProgressUpdate {
+      highestIndex
+      highestRelevantIndex
+      highestRelevantWalletIndex
+    }
+    ... on ViewingUpdate {
+      index
+      update {
+        ... on RelevantTransaction {
+          transaction {
+            hash
+            protocolVersion
+          }
+          start
+          end
+        }
+        ... on MerkleTreeCollapsedUpdate {
+          protocolVersion
+          start
+          end
+          update
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+query GetUnshieldedUtxos($address: UnshieldedAddress!) {
+  unshieldedUtxos(address: $address) {
+    owner
+    value
+    tokenType
+    outputIndex
+    createdAtTransaction {
+      hash
+      protocolVersion
+    }
+    spentAtTransaction {
+      hash
+      protocolVersion
+    }
+  }
+}

@@ -1,0 +1,17 @@
+query GetTransactions($offset: TransactionOffset!) {
+  transactions(offset: $offset) {
+    hash
+    protocolVersion
+    applyStage
+    identifiers
+    raw
+    merkleTreeRoot
+    block {
+      height
+      timestamp
+    }
+    contractActions {
+      address
+    }
+  }
+}
